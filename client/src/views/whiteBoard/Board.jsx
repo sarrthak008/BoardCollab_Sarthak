@@ -1,6 +1,9 @@
 import React, { useState, useRef, useEffect } from "react";
+import { useParams, useNavigate, Link } from "react-router-dom";
 import { Stage, Layer, Line, Rect, Circle, Text, Transformer } from "react-konva";
 import { sileo } from "sileo";
+import api from "../../utils/api";
+import { connectSocket } from "../../utils/socket";
 
 const COLORS = ["#171717", "#ef4444", "#3b82f6", "#10b981", "#f59e0b", "#8b5cf6"];
 const FONT_SIZES = [
@@ -15,16 +18,34 @@ const STROKE_WIDTHS = [
   { label: "Bold", value: 7 },
 ];
 
+const getInitials = (name = "U") =>
+  name
+    .split(" ")
+    .map((n) => n[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+
 const Board = () => {
+  const { roomId } = useParams();
+  const navigate = useNavigate();
+
   const stageRef = useRef(null);
   const transformerRef = useRef(null);
   const isDrawing = useRef(false);
   const textInputRef = useRef(null);
+  const lastCursorEmit = useRef(0);
 
   const [stageSize, setStageSize] = useState({
     width: window.innerWidth,
     height: window.innerHeight,
   });
+
+  // Room & Live Collaboration State
+  const [roomName, setRoomName] = useState("BoardCollab");
+  const [onlineUsers, setOnlineUsers] = useState([]);
+  const [remoteCursors, setRemoteCursors] = useState({});
+  const [isConnected, setIsConnected] = useState(false);
 
   // Active tool, color, font size & stroke width
   const [tool, setTool] = useState("pen"); // select | pen | rect | circle | text | eraser
@@ -50,6 +71,133 @@ const Board = () => {
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
+
+  // Offline localStorage cache backup
+  useEffect(() => {
+    if (roomId && elements.length > 0) {
+      localStorage.setItem(`board_cache_${roomId}`, JSON.stringify(elements));
+    }
+  }, [elements, roomId]);
+
+  // Fetch Room Info & Wire Up Socket.IO Listeners
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      navigate("/register");
+      return;
+    }
+
+    const cached = localStorage.getItem(`board_cache_${roomId}`);
+    if (cached) {
+      try {
+        setElements(JSON.parse(cached));
+      } catch {}
+    }
+
+    const fetchRoomInfo = async () => {
+      try {
+        const savedPw = sessionStorage.getItem(`room_pw_${roomId}`) || "";
+        const res = await api.get(`/api/rooms/${roomId}`, {
+          headers: savedPw ? { "x-room-password": savedPw } : {},
+        });
+        setRoomName(res.data.data.name);
+        if (res.data.data.elements?.length) {
+          setElements(res.data.data.elements);
+        }
+      } catch (error) {
+        sileo.error({
+          title: error.response?.data?.message || "Could not load room",
+        });
+        navigate("/rooms");
+      }
+    };
+
+    fetchRoomInfo();
+
+    const socket = connectSocket();
+    if (!socket) return;
+
+    const handleConnect = () => {
+      setIsConnected(true);
+      socket.emit("join-room", { roomId });
+    };
+
+    const handleDisconnect = () => {
+      setIsConnected(false);
+    };
+
+    if (socket.connected) {
+      handleConnect();
+    }
+
+    socket.on("connect", handleConnect);
+    socket.on("disconnect", handleDisconnect);
+
+    socket.on("canvas-state", ({ elements: serverElements }) => {
+      if (Array.isArray(serverElements)) {
+        setElements(serverElements);
+      }
+    });
+
+    socket.on("room-users", (users) => {
+      setOnlineUsers(users);
+    });
+
+    socket.on("draw-stroke", ({ element }) => {
+      setElements((prev) =>
+        prev.some((el) => el.id === element.id) ? prev : [...prev, element]
+      );
+    });
+
+    socket.on("update-element", ({ element }) => {
+      setElements((prev) =>
+        prev.map((el) => (el.id === element.id ? element : el))
+      );
+    });
+
+    socket.on("undo", ({ elementId }) => {
+      setElements((prev) => prev.filter((el) => el.id !== elementId));
+    });
+
+    socket.on("redo", ({ element }) => {
+      setElements((prev) =>
+        prev.some((el) => el.id === element.id) ? prev : [...prev, element]
+      );
+    });
+
+    socket.on("clear-canvas", () => {
+      setElements([]);
+      setSelectedId(null);
+      localStorage.removeItem(`board_cache_${roomId}`);
+    });
+
+    socket.on("cursor-move", ({ socketId, name, x, y }) => {
+      setRemoteCursors((prev) => ({
+        ...prev,
+        [socketId]: { name, x, y },
+      }));
+    });
+
+    const heartbeatInterval = setInterval(() => {
+      if (socket.connected) {
+        socket.emit("heartbeat");
+      }
+    }, 30000);
+
+    return () => {
+      clearInterval(heartbeatInterval);
+      socket.off("connect", handleConnect);
+      socket.off("disconnect", handleDisconnect);
+      socket.off("canvas-state");
+      socket.off("room-users");
+      socket.off("draw-stroke");
+      socket.off("update-element");
+      socket.off("undo");
+      socket.off("redo");
+      socket.off("clear-canvas");
+      socket.off("cursor-move");
+    };
+  }, [roomId, navigate]);
 
   // Attach Konva Transformer box to whichever shape/text is selected
   useEffect(() => {
@@ -77,12 +225,13 @@ const Board = () => {
         document.activeElement.tagName !== "INPUT"
       ) {
         setElements((prev) => prev.filter((el) => el.id !== selectedId));
+        connectSocket()?.emit("undo", { roomId, elementId: selectedId });
         setSelectedId(null);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedId, textInput]);
+  }, [selectedId, textInput, roomId]);
 
   // Commit Text Input
   const handleTextSubmit = (e) => {
@@ -115,11 +264,12 @@ const Board = () => {
     setTextInput(null);
     setSelectedId(id);
     setTool("select");
+
+    connectSocket()?.emit("draw-stroke", { roomId, element: newTextElement });
   };
 
   // Mouse / Touch Down
   const handleMouseDown = (e) => {
-    // Clicking on empty canvas clears selection
     const clickedOnEmpty =
       e.target === e.target.getStage() || e.target.name() === "bg-rect";
 
@@ -134,7 +284,6 @@ const Board = () => {
     const pos = stage.getPointerPosition();
     if (!pos) return;
 
-    // Text tool opens floating input
     if (tool === "text") {
       if (textInput && textInput.value.trim()) {
         handleTextSubmit();
@@ -200,11 +349,21 @@ const Board = () => {
 
   // Mouse / Touch Move
   const handleMouseMove = (e) => {
-    if (!isDrawing.current) return;
-
     const stage = e.target.getStage();
     const point = stage.getPointerPosition();
     if (!point) return;
+
+    const now = Date.now();
+    if (now - lastCursorEmit.current > 50) {
+      lastCursorEmit.current = now;
+      connectSocket()?.emit("cursor-move", {
+        roomId,
+        x: point.x,
+        y: point.y,
+      });
+    }
+
+    if (!isDrawing.current) return;
 
     setElements((prev) => {
       if (prev.length === 0) return prev;
@@ -245,6 +404,7 @@ const Board = () => {
     if (lastElement) {
       setHistory((prev) => [...prev, lastElement]);
       setRedoStack([]);
+      connectSocket()?.emit("draw-stroke", { roomId, element: lastElement });
     }
   };
 
@@ -253,11 +413,14 @@ const Board = () => {
     setFontSize(newSize);
     if (selectedId) {
       setElements((prev) =>
-        prev.map((el) =>
-          el.id === selectedId && el.type === "text"
-            ? { ...el, data: { ...el.data, fontSize: newSize } }
-            : el
-        )
+        prev.map((el) => {
+          if (el.id === selectedId && el.type === "text") {
+            const updated = { ...el, data: { ...el.data, fontSize: newSize } };
+            connectSocket()?.emit("update-element", { roomId, element: updated });
+            return updated;
+          }
+          return el;
+        })
       );
     }
   };
@@ -271,10 +434,12 @@ const Board = () => {
       setElements((prev) =>
         prev.map((el) => {
           if (el.id !== selectedId) return el;
-          if (el.type === "text") {
-            return { ...el, data: { ...el.data, fill: newColor } };
-          }
-          return { ...el, data: { ...el.data, stroke: newColor } };
+          const updated =
+            el.type === "text"
+              ? { ...el, data: { ...el.data, fill: newColor } }
+              : { ...el, data: { ...el.data, stroke: newColor } };
+          connectSocket()?.emit("update-element", { roomId, element: updated });
+          return updated;
         })
       );
     }
@@ -288,6 +453,8 @@ const Board = () => {
     setRedoStack((prev) => [...prev, lastAction]);
     setElements((prev) => prev.filter((el) => el.id !== lastAction.id));
     if (selectedId === lastAction.id) setSelectedId(null);
+
+    connectSocket()?.emit("undo", { roomId, elementId: lastAction.id });
   };
 
   // Per-User Redo
@@ -297,6 +464,8 @@ const Board = () => {
     setRedoStack((prev) => prev.slice(0, -1));
     setHistory((prev) => [...prev, nextAction]);
     setElements((prev) => [...prev, nextAction]);
+
+    connectSocket()?.emit("redo", { roomId, element: nextAction });
   };
 
   // Clear Canvas
@@ -306,6 +475,8 @@ const Board = () => {
     setHistory([]);
     setRedoStack([]);
     setSelectedId(null);
+    localStorage.removeItem(`board_cache_${roomId}`);
+    connectSocket()?.emit("clear-canvas", { roomId });
     sileo.success({ title: "Canvas cleared" });
   };
 
@@ -329,9 +500,12 @@ const Board = () => {
   const handleDragEnd = (id, e) => {
     const { x, y } = e.target.position();
     setElements((prev) =>
-      prev.map((el) =>
-        el.id === id ? { ...el, data: { ...el.data, x, y } } : el
-      )
+      prev.map((el) => {
+        if (el.id !== id) return el;
+        const updated = { ...el, data: { ...el.data, x, y } };
+        connectSocket()?.emit("update-element", { roomId, element: updated });
+        return updated;
+      })
     );
   };
 
@@ -346,8 +520,9 @@ const Board = () => {
     setElements((prev) =>
       prev.map((el) => {
         if (el.id !== id) return el;
+        let updated = el;
         if (el.type === "rect") {
-          return {
+          updated = {
             ...el,
             data: {
               ...el.data,
@@ -357,9 +532,8 @@ const Board = () => {
               height: Math.max(5, node.height() * scaleY),
             },
           };
-        }
-        if (el.type === "circle") {
-          return {
+        } else if (el.type === "circle") {
+          updated = {
             ...el,
             data: {
               ...el.data,
@@ -368,11 +542,10 @@ const Board = () => {
               radius: Math.max(5, el.data.radius * scaleX),
             },
           };
-        }
-        if (el.type === "text") {
+        } else if (el.type === "text") {
           const updatedFontSize = Math.max(10, Math.round(el.data.fontSize * scaleY));
           setFontSize(updatedFontSize);
-          return {
+          updated = {
             ...el,
             data: {
               ...el.data,
@@ -381,11 +554,14 @@ const Board = () => {
               fontSize: updatedFontSize,
             },
           };
+        } else {
+          updated = {
+            ...el,
+            data: { ...el.data, x: node.x(), y: node.y() },
+          };
         }
-        return {
-          ...el,
-          data: { ...el.data, x: node.x(), y: node.y() },
-        };
+        connectSocket()?.emit("update-element", { roomId, element: updated });
+        return updated;
       })
     );
   };
@@ -407,31 +583,42 @@ const Board = () => {
     <div className="relative w-screen h-screen overflow-hidden bg-white font-sans">
       {/* Top-Left: Back to Rooms + Room Title */}
       <div className="fixed top-5 left-5 z-20 flex items-center gap-3 bg-white/90 backdrop-blur-xs border border-neutral-200 rounded-xl px-3.5 py-2 shadow-2xs">
-        <a
-          href="/rooms"
+        <Link
+          to="/rooms"
           aria-label="Back to rooms"
           className="text-neutral-600 hover:text-black transition flex items-center"
         >
           <i className="ri-arrow-left-line text-base"></i>
-        </a>
+        </Link>
         <div className="h-4 w-[1px] bg-neutral-200" />
         <span className="text-xs font-semibold text-neutral-900">
-          Board<span className="bg-[#ffe11b] px-1 rounded">Collab</span>
+          {roomName}{" "}
+          <span
+            className={`inline-block w-1.5 h-1.5 rounded-full ml-1 ${
+              isConnected ? "bg-emerald-500" : "bg-amber-500"
+            }`}
+            title={isConnected ? "Live synced" : "Offline mode"}
+          />
         </span>
       </div>
 
       {/* Top-Right: Online Users + Export */}
       <div className="fixed top-5 right-5 z-20 flex items-center gap-2.5 bg-white/90 backdrop-blur-xs border border-neutral-200 rounded-xl px-3.5 py-2 shadow-2xs">
         <div className="flex -space-x-2">
-          <div className="w-6 h-6 rounded-full bg-[#ffe11b] ring-2 ring-white flex items-center justify-center text-[9px] font-bold">
-            YO
-          </div>
-          <div className="w-6 h-6 rounded-full bg-[#bae6fd] ring-2 ring-white flex items-center justify-center text-[9px] font-bold">
-            AK
-          </div>
+          {onlineUsers.slice(0, 4).map((u, idx) => (
+            <div
+              key={`${u.userId}-${idx}`}
+              title={u.name}
+              className={`w-6 h-6 rounded-full ${
+                idx % 2 === 0 ? "bg-[#ffe11b]" : "bg-[#bae6fd]"
+              } ring-2 ring-white flex items-center justify-center text-[9px] font-bold`}
+            >
+              {getInitials(u.name)}
+            </div>
+          ))}
         </div>
         <span className="text-xs text-neutral-500 font-medium pr-1">
-          2 online
+          {onlineUsers.length || 1} online
         </span>
         <div className="h-4 w-[1px] bg-neutral-200" />
         <button
@@ -586,6 +773,20 @@ const Board = () => {
           />
         </form>
       )}
+
+      {/* Remote Users' Live Cursors */}
+      {Object.entries(remoteCursors).map(([id, cursor]) => (
+        <div
+          key={id}
+          style={{ transform: `translate(${cursor.x}px, ${cursor.y}px)` }}
+          className="fixed top-0 left-0 z-10 pointer-events-none transition-transform duration-75"
+        >
+          <i className="ri-cursor-fill text-black text-base"></i>
+          <span className="ml-2 -mt-1 inline-block bg-[#ffe11b] text-neutral-900 text-[10px] font-semibold px-1.5 py-0.5 rounded">
+            {cursor.name}
+          </span>
+        </div>
+      ))}
 
       {/* Konva Drawing Stage */}
       <Stage

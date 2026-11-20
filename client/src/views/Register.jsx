@@ -1,7 +1,11 @@
 import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { sileo } from "sileo";
+import api from "../utils/api";
 
 const Register = () => {
+  const navigate = useNavigate();
+
   const [registerData, setRegisterData] = useState({
     name: "",
     email: "",
@@ -14,6 +18,8 @@ const Register = () => {
     password: "",
   });
 
+  const [loading, setLoading] = useState(false);
+
   const handleRegisterChange = (e) => {
     setRegisterData({ ...registerData, [e.target.name]: e.target.value });
   };
@@ -22,7 +28,7 @@ const Register = () => {
     setLoginData({ ...loginData, [e.target.name]: e.target.value });
   };
 
-  const handleRegisterSubmit = (e) => {
+  const handleRegisterSubmit = async (e) => {
     e.preventDefault();
 
     const name = registerData.name.trim();
@@ -44,15 +50,34 @@ const Register = () => {
       return;
     }
 
-    console.log("Registering user:", { name, email, password });
-    sileo.success({
-      title: "Account created!",
-      description: `Welcome to BoardCollab, ${name}`,
-    });
-    setRegisterData({ name: "", email: "", password: "" });
+    setLoading(true);
+    try {
+      const res = await api.post("/api/auth/register", {
+        name,
+        email,
+        password,
+      });
+
+      const { token, user } = res.data.data;
+      localStorage.setItem("token", token);
+      localStorage.setItem("user", JSON.stringify(user));
+
+      sileo.success({
+        title: "Account created!",
+        description: `Welcome to BoardCollab, ${user.name}`,
+      });
+      setRegisterData({ name: "", email: "", password: "" });
+      navigate("/rooms");
+    } catch (error) {
+      sileo.error({
+        title: error.response?.data?.message || "Registration failed",
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleLoginSubmit = (e) => {
+  const handleLoginSubmit = async (e) => {
     e.preventDefault();
 
     const email = loginData.email.trim();
@@ -68,13 +93,31 @@ const Register = () => {
       return;
     }
 
-    console.log("Logging in user:", { email, password });
-    sileo.success({
-      title: "Welcome back!",
-      description: `Logged in as ${email}`,
-    });
-    setLoginData({ email: "", password: "" });
-    setIsLoginOpen(false);
+    setLoading(true);
+    try {
+      const res = await api.post("/api/auth/login", {
+        email,
+        password,
+      });
+
+      const { token, user } = res.data.data;
+      localStorage.setItem("token", token);
+      localStorage.setItem("user", JSON.stringify(user));
+
+      sileo.success({
+        title: "Welcome back!",
+        description: `Logged in as ${user.email}`,
+      });
+      setLoginData({ email: "", password: "" });
+      setIsLoginOpen(false);
+      navigate("/rooms");
+    } catch (error) {
+      sileo.error({
+        title: error.response?.data?.message || "Login failed",
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -161,9 +204,10 @@ const Register = () => {
 
             <button
               type="submit"
-              className="w-full bg-black text-white font-medium text-sm py-2.5 px-4 rounded-lg hover:bg-neutral-800 transition flex items-center justify-center gap-1.5 cursor-pointer"
+              disabled={loading}
+              className="w-full bg-black text-white font-medium text-sm py-2.5 px-4 rounded-lg hover:bg-neutral-800 disabled:opacity-50 transition flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              <span>Register</span>
+              <span>{loading ? "Please wait..." : "Register"}</span>
               <i className="ri-arrow-right-up-line text-base"></i>
             </button>
           </form>
@@ -239,9 +283,10 @@ const Register = () => {
 
               <button
                 type="submit"
-                className="w-full bg-black text-white font-medium text-sm py-2.5 px-4 rounded-lg hover:bg-neutral-800 transition flex items-center justify-center gap-1.5 cursor-pointer"
+                disabled={loading}
+                className="w-full bg-black text-white font-medium text-sm py-2.5 px-4 rounded-lg hover:bg-neutral-800 disabled:opacity-50 transition flex items-center justify-center gap-1.5 cursor-pointer"
               >
-                <span>Login</span>
+                <span>{loading ? "Please wait..." : "Login"}</span>
                 <i className="ri-login-box-line text-base"></i>
               </button>
             </form>
