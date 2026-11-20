@@ -1,0 +1,5 @@
+.home,
+.home a,
+.home button {
+  cursor: url("/cursor.png") 2 30, crosshair;
+}
