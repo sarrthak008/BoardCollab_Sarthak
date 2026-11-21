@@ -128,7 +128,7 @@ npm install
 Create a `.env` file inside `server/`:
 ```env
 PORT=5000
-MONGO_URI=mongodb://127.0.0.1:27017/boardcollab
+MONGO_DB_URL=mongodb://127.0.0.1:27017/boardcollab
 JWT_SECRET=your_super_secret_jwt_key
 CLIENT_URL=http://localhost:5173
 ```
