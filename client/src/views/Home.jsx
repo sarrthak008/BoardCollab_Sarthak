@@ -14,7 +14,7 @@ const Home = () => {
       <nav className='flex w-full max-w-6xl items-center justify-between py-6'>
         <span className='w-16' />
         <h2 className='font-display text-lg font-bold'>BoardCollab</h2>
-        <Link to='/login' className='w-16 text-right text-sm font-medium hover:underline'>
+        <Link to='/register' className='w-16 text-right text-sm font-medium hover:underline'>
           Login
         </Link>
       </nav>
