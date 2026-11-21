@@ -115,7 +115,7 @@ flowchart LR
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/<your-username>/BoardCollab.git
+git clone https://github.com/sarrthak008/BoardCollab_Sarthak/
 cd boardCollab
 ```
 
